@@ -5,7 +5,7 @@ import { createIdentityStore, parseHtpasswd, parseHtgroup, verifyPassword } from
 import { loadOrCreateKey, jwks, ALG } from './lib/keys.js'
 import { issueToken, createTokenVerifier } from './lib/tokens.js'
 import { basic, jwt } from './lib/verifiers.js'
-import { resolveClients, redirectUriAllowed, validateRedirectUri, registerDynamicClient } from './lib/clients.js'
+import { redirectUriAllowed, validateRedirectUri, registerDynamicClient } from './lib/clients.js'
 import { challengeFromVerifier, verifyPkce, opaqueToken } from './lib/pkce.js'
 import { loginPage } from './lib/login-page.js'
 import { mountRoutes } from './lib/routes.js'
@@ -14,7 +14,7 @@ import * as grants from './lib/grants.js'
 export { parseHtpasswd, parseHtgroup, verifyPassword, createIdentityStore }
 export { loadOrCreateKey, jwks, ALG }
 export { issueToken, createTokenVerifier }
-export { resolveClients, redirectUriAllowed, validateRedirectUri, registerDynamicClient }
+export { redirectUriAllowed, validateRedirectUri, registerDynamicClient }
 export { challengeFromVerifier, verifyPkce, opaqueToken }
 export { loginPage }
 export { grants }
@@ -55,15 +55,10 @@ export function auth(options = {}) {
         base         = '/auth',
         ttl          = '1h',
         realm        = 'mikser',
-        clients      = {},
-        dcr          = true,
+        dcr          = {},
         pruneClientsAfterDays = 30,
-        appName,
         logo,
     } = options
-
-    // Fail at config time, not at the first sign-in attempt.
-    const registeredClients = resolveClients(clients)
 
     // Filled in at onLoad, read by the verifiers at request time.
     let state = null
@@ -130,10 +125,21 @@ export function auth(options = {}) {
 
             const originOf = (req) => issuer ?? `${req.protocol}://${req.get('host')}`
 
+            // What the sign-in page calls this deployment. Not a config
+            // option: mikser already knows its external URL, and failing
+            // that, the host in the address bar is the most honest name
+            // there is — it IS the thing you connected to, so it cannot
+            // name a different deployment than the one in front of you.
+            const nameOf = (req) => {
+                try {
+                    if (runtime.options.url) return new URL(runtime.options.url).host
+                } catch { /* not a URL — fall through */ }
+                return req.get('host')
+            }
+
             mountRoutes(router, {
                 base,
-                clients:  registeredClients,
-                appName:  appName ?? runtime.config?.name,
+                nameOf,
                 logoUrl:  logo ?? `${base}/logo.svg`,
                 realm,
                 ttl,
@@ -161,7 +167,7 @@ export function auth(options = {}) {
                 // machine leaves another row behind. Only ones nobody ever
                 // signed in with are dropped; a config-declared client is
                 // never touched, because it lives in config, not this table.
-                if (dcr && pruneClientsAfterDays) {
+                if (pruneClientsAfterDays) {
                     const pruned = grants.pruneUnusedClients({
                         olderThanMs: pruneClientsAfterDays * 24 * 60 * 60 * 1000,
                     })
@@ -177,11 +183,10 @@ export function auth(options = {}) {
                 reachability: 'public',
                 streaming:    false,
                 label:        'Auth',
-                detail:       `(authorize, token, jwks${dcr ? ', register' : ''}; alg=${ALG}, clients=${registeredClients.size}${dcr ? '+dcr' : ''})`,
+                detail:       `(authorize, token, register, jwks; alg=${ALG})`,
                 authLabel:    'public',
             })
-            logger?.info?.('Auth mounted at %s (users=%s, groups=%s, clients=%d)',
-                base, users, groups, registeredClients.size)
+            logger?.info?.('Auth mounted at %s (users=%s, groups=%s)', base, users, groups)
         })
     }
 

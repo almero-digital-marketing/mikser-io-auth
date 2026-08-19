@@ -105,10 +105,15 @@ const identity = auth({
         editors: { 'meta.href': { $regex: '^/web' } },
     },
 
-    appName: 'GPoint CMS',       // shown on the sign-in page
-    issuer:  'https://cms.example.com',
+    issuer: 'https://cms.example.com',
 })
 ```
+
+The sign-in page names the deployment from mikser's own external URL
+(`runtime.options.url`), falling back to the host you connected to. It is
+not a config option — the host in the address bar is the most honest name
+there is, because it *is* the thing in front of you and so cannot name a
+different deployment.
 
 `auth()` returns a value that is both the lifecycle plugin and the factory
 for the verifiers — because config is evaluated before the runtime exists,
@@ -138,7 +143,7 @@ Mounted at `base` (default `/auth`) when mikser runs with `--server`:
 | `GET /auth/authorize` | the sign-in page |
 | `POST /auth/authorize` | verify against `users.htpasswd`, redirect back with a code |
 | `POST /auth/token` | `authorization_code`, `refresh_token`, or `password` |
-| `POST /auth/register` | RFC 7591 self-registration (only when `dcr` is on) |
+| `POST /auth/register` | RFC 7591 self-registration — the only way a client exists |
 | `GET /auth/jwks.json` | the public half of the signing key |
 | `GET /auth/.well-known/oauth-authorization-server` | RFC 8414 metadata |
 | `GET /auth/logo.svg` | the mark on the sign-in page |
@@ -149,23 +154,21 @@ For a script or CLI, skip the browser entirely:
 curl -u alice:alice-pw -X POST https://cms.example.com/auth/token
 ```
 
-### Clients — any agent, nothing to configure
+### Clients — there is no client config
 
-Agents register themselves (RFC 7591), which is on by default. An agent
-whose UI takes a URL and nothing else has no field to type a `client_id`
-into: it registers or it cannot connect at all. There is no list to
-maintain and no per-agent redirect to write down — the agent supplies its
-own, and it is checked.
+Agents register themselves (RFC 7591). There is no list to maintain, no
+per-agent redirect to write down, and no way to declare one.
 
-Declare a client only to pin an id you choose yourself:
+A `clients:` map sounds harmless and isn't: it makes the set of agents that
+can connect equal to the set somebody thought to write down, so every new
+agent becomes a config change and a deploy. And an agent whose UI takes a
+URL and nothing else has no field to type a `client_id` into — it registers
+or it cannot connect at all.
+
+Tune the bounds if you need to:
 
 ```js
-auth({
-    clients: {
-        claude: { name: 'Claude', redirectUris: ['http://127.0.0.1/callback'] },
-    },
-    dcr: false,                  // or { maxPerIp, windowMs, maxClients }
-})
+auth({ dcr: { maxPerIp: 5, windowMs: 3600_000, maxClients: 1000 } })
 ```
 
 Public clients either way: PKCE (S256) required, no `client_secret`, because
@@ -181,14 +184,12 @@ What is at risk is table volume, not access — hence `maxPerIp` (in-process,
 counts every request including rejected ones) and `maxClients` (a row count,
 the bound that survives a restart).
 
-A config-declared `client_id` can never be shadowed by a registered one.
 Registration names are attacker-controlled, so they are length-capped and
 HTML-escaped where they render.
 
 Every registration mints a **new** `client_id` — RFC 7591 has no get-or-create
 — so a reinstall or a second machine leaves another row behind. Registrations
-nobody ever signed in with are pruned after `pruneClientsAfterDays` (30);
-config-declared clients are never touched, because they are not in that table.
+nobody ever signed in with are pruned after `pruneClientsAfterDays` (30).
 
 ### Redirect URIs
 

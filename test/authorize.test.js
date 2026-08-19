@@ -15,7 +15,9 @@ import { auth } from '../index.js'
 // that actually runs.
 let server, port, dir
 
-const CLIENT   = 'test-client'
+// There is no config path for a client — every one registers itself, so the
+// tests do too. CLIENT is filled in by before().
+let CLIENT
 const REDIRECT = 'http://127.0.0.1/callback'
 
 before(async () => {
@@ -49,12 +51,12 @@ before(async () => {
     for (const hook of runtime.hooks.initialize) await hook()
     for (const hook of runtime.hooks.loaded) await hook()
 
+    runtime.options.url = 'https://test-mikser.example'
+
     const plugin = auth({
         capabilities: { editors: ['api:list', 'api:update'] },
         scopes:       { editors: { 'meta.href': { $regex: '^/web' } } },
-        appName:      'Test Mikser',
-        clients:      { [CLIENT]: { name: 'Test Client', redirectUris: [REDIRECT] } },
-        dcr:          { maxPerIp: 50 },
+        dcr:          { maxPerIp: 500 },
     })
 
     const load = [], loaded = []
@@ -71,6 +73,13 @@ before(async () => {
         const s = app.listen(0, () => resolve(s))
     })
     port = server.address().port
+
+    const reg = await fetch(`http://127.0.0.1:${port}/auth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ client_name: 'Test Client', redirect_uris: [REDIRECT] }),
+    })
+    CLIENT = (await reg.json()).client_id
 })
 
 after(async () => {
@@ -119,7 +128,7 @@ describe('GET /authorize — the login page', () => {
         assert.equal(res.status, 200)
         assert.match(res.headers.get('content-type'), /text\/html/)
         const html = await res.text()
-        assert.match(html, /Sign in to Test Mikser/)
+        assert.match(html, /Sign in to test-mikser\.example/)
         assert.match(html, /to give <strong>Test Client<\/strong> access/)
         assert.match(html, /name="username"[^>]*autocomplete="username"/)
         assert.match(html, /autocomplete="current-password"/)
@@ -433,10 +442,10 @@ describe('POST /register — any agent, no operator config (RFC 7591)', () => {
         assert.equal((await register({ client_name: 'X', redirect_uris: [] })).status, 400)
     })
 
-    it('cannot shadow a config-declared client_id', async () => {
-        // A registration must never be able to take over a name an operator
-        // wrote down; config wins the lookup unconditionally.
-        const page = await fetch(authorizeUrl(pkcePair().challenge))
-        assert.match(await page.text(), /to give <strong>Test Client<\/strong> access/)
+    it('is the only way a client exists — an unregistered id is refused', async () => {
+        const res = await fetch(authorizeUrl(pkcePair().challenge, { client_id: 'never-registered' }),
+                                { redirect: 'manual' })
+        assert.equal(res.status, 400)
+        assert.equal(res.headers.get('location'), null)
     })
 })

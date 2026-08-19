@@ -2,24 +2,9 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-    resolveClients, redirectUriAllowed, validateRedirectUri,
-    registerDynamicClient, RegistrationError, clientLookup,
+    redirectUriAllowed, validateRedirectUri,
+    registerDynamicClient, RegistrationError,
 } from '../lib/clients.js'
-
-describe('resolveClients', () => {
-    it('accepts both redirectUris and redirect_uris', () => {
-        const c = resolveClients({
-            a: { name: 'A', redirectUris: ['https://a/cb'] },
-            b: { redirect_uris: ['https://b/cb'] },
-        })
-        assert.deepEqual(c.get('a').redirectUris, ['https://a/cb'])
-        assert.equal(c.get('b').name, 'b', 'falls back to the id as the name')
-    })
-
-    it('fails at config time when a client declares no redirect', () => {
-        assert.throws(() => resolveClients({ a: { name: 'A' } }), /declares no redirectUris/)
-    })
-})
 
 describe('redirectUriAllowed', () => {
     const client = { redirectUris: ['http://127.0.0.1/callback', 'https://agent.example.com/cb'] }
@@ -94,21 +79,5 @@ describe('registerDynamicClient bounds', () => {
         const a = registerDynamicClient({ redirectUris: ['https://a/cb'], store })
         const b = registerDynamicClient({ redirectUris: ['https://a/cb'], store })
         assert.notEqual(a.clientId, b.clientId)
-    })
-})
-
-describe('clientLookup precedence', () => {
-    it('config always wins over a self-registered id', () => {
-        const registered = resolveClients({ shared: { name: 'Operator', redirectUris: ['https://a/cb'] } })
-        const store = { getDynamicClient: () => ({ clientId: 'shared', name: 'Impostor', redirectUris: [] }) }
-        assert.equal(clientLookup(registered, store)('shared').name, 'Operator')
-    })
-
-    it('falls through to the dynamic table for unknown ids', () => {
-        const store = { getDynamicClient: (id) => (id === 'dyn' ? { clientId: 'dyn', name: 'Dyn' } : null) }
-        const find = clientLookup(new Map(), store)
-        assert.equal(find('dyn').name, 'Dyn')
-        assert.equal(find('nope'), null)
-        assert.equal(find(undefined), null)
     })
 })
