@@ -5,7 +5,7 @@ import { createIdentityStore, parseHtpasswd, parseHtgroup, verifyPassword } from
 import { loadOrCreateKey, jwks, ALG } from './lib/keys.js'
 import { issueToken, createTokenVerifier } from './lib/tokens.js'
 import { basic, jwt } from './lib/verifiers.js'
-import { resolveClients, redirectUriAllowed } from './lib/clients.js'
+import { resolveClients, redirectUriAllowed, validateRedirectUri, registerDynamicClient } from './lib/clients.js'
 import { challengeFromVerifier, verifyPkce, opaqueToken } from './lib/pkce.js'
 import { loginPage } from './lib/login-page.js'
 import { mountRoutes } from './lib/routes.js'
@@ -14,7 +14,7 @@ import * as grants from './lib/grants.js'
 export { parseHtpasswd, parseHtgroup, verifyPassword, createIdentityStore }
 export { loadOrCreateKey, jwks, ALG }
 export { issueToken, createTokenVerifier }
-export { resolveClients, redirectUriAllowed }
+export { resolveClients, redirectUriAllowed, validateRedirectUri, registerDynamicClient }
 export { challengeFromVerifier, verifyPkce, opaqueToken }
 export { loginPage }
 export { grants }
@@ -56,6 +56,8 @@ export function auth(options = {}) {
         ttl          = '1h',
         realm        = 'mikser',
         clients      = {},
+        dcr          = false,
+        pruneClientsAfterDays = 30,
         appName,
         logo,
     } = options
@@ -138,6 +140,7 @@ export function auth(options = {}) {
                 ready,
                 issuerFor:   originOf,
                 audienceFor: (req) => audience ?? originOf(req),
+                dcr,
                 logger,
             })
 
@@ -153,6 +156,17 @@ export function auth(options = {}) {
                     logger?.debug?.('auth: swept %d expired code(s), %d refresh token(s)',
                         swept.codes, swept.refresh)
                 }
+                // Every registration mints a NEW client_id — there is no
+                // "get or create" in RFC 7591 — so a reinstall or a second
+                // machine leaves another row behind. Only ones nobody ever
+                // signed in with are dropped; a config-declared client is
+                // never touched, because it lives in config, not this table.
+                if (dcr && pruneClientsAfterDays) {
+                    const pruned = grants.pruneUnusedClients({
+                        olderThanMs: pruneClientsAfterDays * 24 * 60 * 60 * 1000,
+                    })
+                    if (pruned) logger?.info?.('auth: pruned %d unused client registration(s)', pruned)
+                }
             } catch (err) {
                 logger?.debug?.('auth: could not sweep expired grants — %s', err.message)
             }
@@ -163,7 +177,7 @@ export function auth(options = {}) {
                 reachability: 'public',
                 streaming:    false,
                 label:        'Auth',
-                detail:       `(authorize, token, jwks; alg=${ALG}, clients=${registeredClients.size})`,
+                detail:       `(authorize, token, jwks${dcr ? ', register' : ''}; alg=${ALG}, clients=${registeredClients.size}${dcr ? '+dcr' : ''})`,
                 authLabel:    'public',
             })
             logger?.info?.('Auth mounted at %s (users=%s, groups=%s, clients=%d)',

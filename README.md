@@ -112,6 +112,7 @@ Mounted at `base` (default `/auth`) when mikser runs with `--server`:
 | `GET /auth/authorize` | the sign-in page |
 | `POST /auth/authorize` | verify against `users.htpasswd`, redirect back with a code |
 | `POST /auth/token` | `authorization_code`, `refresh_token`, or `password` |
+| `POST /auth/register` | RFC 7591 self-registration (only when `dcr` is on) |
 | `GET /auth/jwks.json` | the public half of the signing key |
 | `GET /auth/.well-known/oauth-authorization-server` | RFC 8414 metadata |
 | `GET /auth/logo.svg` | the mark on the sign-in page |
@@ -122,30 +123,60 @@ For a script or CLI, skip the browser entirely:
 curl -u alice:alice-pw -X POST https://cms.example.com/auth/token
 ```
 
-### Clients
-
-Declared in config — no Dynamic Client Registration. DCR is convenient for a
-multi-tenant SaaS and a real attack surface for a self-hosted build server.
-Public clients only: PKCE (S256) is required and there is no `client_secret`,
-because a browser or an MCP client cannot keep one.
+### Clients — any agent, two ways in
 
 ```js
 auth({
     appName: 'GPoint CMS',       // shown on the sign-in page
+
+    // 1. Declared by an operator. Precise, auditable, and the only way to
+    //    pin a client_id you choose yourself.
     clients: {
         claude: {
             name: 'Claude',      // shown as "to give Claude access"
             redirectUris: ['http://127.0.0.1/callback'],
         },
     },
+
+    // 2. Declared by the agent itself (RFC 7591). Required for any agent
+    //    whose UI takes a URL and nothing else — it has no field to type a
+    //    client_id into, so it registers or it cannot connect at all.
+    dcr: true,                   // or { maxPerIp, windowMs, maxClients }
 })
 ```
 
-Redirect URIs match exactly, with one exception: RFC 8252 §7.3 requires the
-**port of a loopback URI to be ignored**, because a native client binds an
-ephemeral port it cannot know in advance. Every MCP client that opens a
-browser depends on this. Scheme, host, path, query and fragment still match
-exactly.
+Public clients either way: PKCE (S256) required, no `client_secret`, because
+a browser or a native agent cannot keep one.
+
+`POST /auth/register` is **unauthenticated by necessity** — you need a
+`client_id` before you can authenticate, so a token requirement would make the
+endpoint useless to the only callers that need it. That is safe because a
+registered client can do nothing on its own: it holds no tokens and represents
+no person, and cannot act until someone signs in on the page, where what they
+can do comes from their groups rather than from anything the client asked for.
+What is at risk is table volume, not access — hence `maxPerIp` (in-process,
+counts every request including rejected ones) and `maxClients` (a row count,
+the bound that survives a restart).
+
+A config-declared `client_id` can never be shadowed by a registered one.
+Registration names are attacker-controlled, so they are length-capped and
+HTML-escaped where they render.
+
+Every registration mints a **new** `client_id` — RFC 7591 has no get-or-create
+— so a reinstall or a second machine leaves another row behind. Registrations
+nobody ever signed in with are pruned after `pruneClientsAfterDays` (30);
+config-declared clients are never touched, because they are not in that table.
+
+### Redirect URIs
+
+Matched exactly, with one exception: RFC 8252 §7.3 requires the **port of a
+loopback URI to be ignored**, because a native client binds an ephemeral port
+it cannot know in advance. Every MCP client that opens a browser depends on
+this. Scheme, host, path, query and fragment still match exactly.
+
+A self-registering client is held to a stricter rule than an operator writing
+config, because nobody reviewed it: `https` anywhere, `http` only on loopback,
+and never a fragment.
 
 ### The sign-in page
 

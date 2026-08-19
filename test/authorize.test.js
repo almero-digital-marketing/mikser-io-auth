@@ -54,6 +54,7 @@ before(async () => {
         scopes:       { editors: { 'meta.href': { $regex: '^/web' } } },
         appName:      'Test Mikser',
         clients:      { [CLIENT]: { name: 'Test Client', redirectUris: [REDIRECT] } },
+        dcr:          { maxPerIp: 50 },
     })
 
     const load = [], loaded = []
@@ -335,5 +336,107 @@ describe('discovery', () => {
         assert.equal(doc.keys.length, 1)
         assert.equal(doc.keys[0].d, undefined)
         assert.ok(doc.keys[0].kid)
+    })
+})
+
+describe('POST /register — any agent, no operator config (RFC 7591)', () => {
+    const register = (body) => fetch(url('/auth/register'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+    })
+
+    it('lets an agent name itself and get a usable client_id', async () => {
+        const res = await register({
+            client_name: 'Some Other Agent',
+            redirect_uris: ['http://127.0.0.1:9321/oauth/callback'],
+        })
+        assert.equal(res.status, 201)
+        const body = await res.json()
+        assert.ok(body.client_id)
+        assert.equal(body.client_name, 'Some Other Agent')
+        assert.equal(body.token_endpoint_auth_method, 'none')
+        assert.equal(body.client_secret, undefined)
+        assert.deepEqual(body.response_types, ['code'])
+    })
+
+    it('the registered client completes a whole sign-in, and the page names IT', async () => {
+        // The point of the whole feature: an agent nobody configured can
+        // connect, and the person signing in is told which agent it is.
+        const reg = await (await register({
+            client_name: 'Fancy Agent',
+            redirect_uris: ['http://127.0.0.1/cb'],
+        })).json()
+
+        const { verifier, challenge } = pkcePair()
+        const q = new URLSearchParams({
+            response_type: 'code', client_id: reg.client_id, redirect_uri: 'http://127.0.0.1:7788/cb',
+            code_challenge: challenge, code_challenge_method: 'S256', state: 'zz',
+        })
+        const page = await fetch(url(`/auth/authorize?${q}`))
+        assert.equal(page.status, 200)
+        assert.match(await page.text(), /to give <strong>Fancy Agent<\/strong> access/)
+
+        const signed = await fetch(url('/auth/authorize'), {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            redirect: 'manual',
+            body: new URLSearchParams({
+                response_type: 'code', client_id: reg.client_id,
+                redirect_uri: 'http://127.0.0.1:7788/cb',
+                code_challenge: challenge, code_challenge_method: 'S256', state: 'zz',
+                username: 'alice', password: 'alice-pw',
+            }),
+        })
+        assert.equal(signed.status, 302)
+        const code = new URL(signed.headers.get('location')).searchParams.get('code')
+
+        const tok = await (await token({
+            grant_type: 'authorization_code', code,
+            redirect_uri: 'http://127.0.0.1:7788/cb',
+            code_verifier: verifier, client_id: reg.client_id,
+        })).json()
+        assert.equal(tok.scope, 'api:list api:update')
+    })
+
+    it('escapes a client name — it is attacker-controlled and lands on the page', async () => {
+        const reg = await (await register({
+            client_name: '<script>alert(1)</script>',
+            redirect_uris: ['http://127.0.0.1/cb'],
+        })).json()
+        const q = new URLSearchParams({
+            response_type: 'code', client_id: reg.client_id, redirect_uri: 'http://127.0.0.1/cb',
+            code_challenge: pkcePair().challenge, code_challenge_method: 'S256',
+        })
+        const html = await (await fetch(url(`/auth/authorize?${q}`))).text()
+        assert.ok(!html.includes('<script>alert(1)</script>'), 'raw script tag must not reach the page')
+        assert.match(html, /&lt;script&gt;/)
+    })
+
+    it('gives a nameless client a neutral name rather than a blank line', async () => {
+        const body = await (await register({ redirect_uris: ['http://127.0.0.1/cb'] })).json()
+        assert.equal(body.client_name, 'Unnamed client')
+    })
+
+    it('refuses redirect URIs that are not https or loopback http', async () => {
+        for (const uri of ['http://evil.example.com/cb', 'ftp://x/cb', 'not-a-uri', 'https://x/cb#frag']) {
+            const res = await register({ client_name: 'X', redirect_uris: [uri] })
+            assert.equal(res.status, 400, `${uri} should be refused`)
+            assert.equal((await res.json()).error, 'invalid_redirect_uri')
+        }
+        const ok = await register({ client_name: 'X', redirect_uris: ['https://agent.example.com/cb'] })
+        assert.equal(ok.status, 201)
+    })
+
+    it('requires a non-empty redirect_uris array', async () => {
+        assert.equal((await register({ client_name: 'X' })).status, 400)
+        assert.equal((await register({ client_name: 'X', redirect_uris: [] })).status, 400)
+    })
+
+    it('cannot shadow a config-declared client_id', async () => {
+        // A registration must never be able to take over a name an operator
+        // wrote down; config wins the lookup unconditionally.
+        const page = await fetch(authorizeUrl(pkcePair().challenge))
+        assert.match(await page.text(), /to give <strong>Test Client<\/strong> access/)
     })
 })
