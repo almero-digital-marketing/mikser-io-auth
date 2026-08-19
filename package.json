@@ -1,0 +1,38 @@
+{
+  "name": "mikser-io-auth",
+  "version": "0.1.0",
+  "description": "Authentication for mikser-io: HTTP Basic and OAuth 2.1 / JWT verifiers over Apache-format htpasswd and htgroup files in the working folder. Implements the ADR-0012 verifier contract, so it plugs in wherever a static token does — api, mcp, forms.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node --no-warnings --test --test-reporter=spec 'test/**/*.test.js'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/almero-digital-marketing/mikser-io-auth.git"
+  },
+  "keywords": [
+    "mikser",
+    "mikser-io",
+    "auth",
+    "oauth",
+    "htpasswd",
+    "jwt"
+  ],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/almero-digital-marketing/mikser-io-auth/issues"
+  },
+  "homepage": "https://github.com/almero-digital-marketing/mikser-io-auth#readme",
+  "peerDependencies": {
+    "mikser-io": "^9.0.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.0",
+    "jose": "^5.9.0"
+  },
+  "devDependencies": {
+    "mikser-io": "file:../mikser-io"
+  }
+}
