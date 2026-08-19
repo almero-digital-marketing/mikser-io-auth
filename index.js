@@ -5,10 +5,19 @@ import { createIdentityStore, parseHtpasswd, parseHtgroup, verifyPassword } from
 import { loadOrCreateKey, jwks, ALG } from './lib/keys.js'
 import { issueToken, createTokenVerifier } from './lib/tokens.js'
 import { basic, jwt } from './lib/verifiers.js'
+import { resolveClients, redirectUriAllowed } from './lib/clients.js'
+import { challengeFromVerifier, verifyPkce, opaqueToken } from './lib/pkce.js'
+import { loginPage } from './lib/login-page.js'
+import { mountRoutes } from './lib/routes.js'
+import * as grants from './lib/grants.js'
 
 export { parseHtpasswd, parseHtgroup, verifyPassword, createIdentityStore }
 export { loadOrCreateKey, jwks, ALG }
 export { issueToken, createTokenVerifier }
+export { resolveClients, redirectUriAllowed }
+export { challengeFromVerifier, verifyPkce, opaqueToken }
+export { loginPage }
+export { grants }
 
 /**
  * Authentication for mikser (ADR-0012).
@@ -46,7 +55,13 @@ export function auth(options = {}) {
         base         = '/auth',
         ttl          = '1h',
         realm        = 'mikser',
+        clients      = {},
+        appName,
+        logo,
     } = options
+
+    // Fail at config time, not at the first sign-in attempt.
+    const registeredClients = resolveClients(clients)
 
     // Filled in at onLoad, read by the verifiers at request time.
     let state = null
@@ -111,81 +126,36 @@ export function auth(options = {}) {
             router.use(express.urlencoded({ extended: false, limit: '8kb' }))
             router.use(express.json({ limit: '8kb' }))
 
-            // JWKS — the public half of the working folder's key, so any
-            // client (or a second mikser) can verify a token we minted.
-            router.get('/jwks.json', (req, res) => {
-                res.json(jwks({ publicJwk: ready().key.publicJwk }))
-            })
+            const originOf = (req) => issuer ?? `${req.protocol}://${req.get('host')}`
 
-            // RFC 8414 authorization-server metadata.
-            router.get('/.well-known/oauth-authorization-server', (req, res) => {
-                const origin = issuer ?? `${req.protocol}://${req.get('host')}`
-                res.json({
-                    issuer:                                 origin,
-                    jwks_uri:                               `${origin}${base}/jwks.json`,
-                    token_endpoint:                         `${origin}${base}/token`,
-                    grant_types_supported:                  ['password'],
-                    token_endpoint_auth_methods_supported:  ['client_secret_basic', 'none'],
-                    response_types_supported:               [],
-                    id_token_signing_alg_values_supported:  [ALG],
-                })
-            })
-
-            // Exchange htpasswd credentials for a JWT.
-            //
-            // This is the credentials grant only — enough for a script, a
-            // CLI, or an MCP client configured with a token out of band. The
-            // browser-facing authorization-code + PKCE flow is deliberately
-            // NOT here yet; see the README.
-            router.post('/token', async (req, res) => {
-                const { store, key, logger: log } = ready()
-
-                let username = req.body?.username
-                let password = req.body?.password
-                const header = req.get('authorization')
-                if (!username && header?.startsWith('Basic ')) {
-                    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8')
-                    const i = decoded.indexOf(':')
-                    if (i >= 0) { username = decoded.slice(0, i); password = decoded.slice(i + 1) }
-                }
-
-                if (!username || typeof password !== 'string') {
-                    return res.status(400).json({ error: 'invalid_request' })
-                }
-
-                const principal = await store.authenticate(username, password)
-                if (!principal) {
-                    log?.warn?.('auth: token request refused for %j (ip=%s)', username, req.ip)
-                    // RFC 6749 §5.2 — invalid_grant, and deliberately no hint
-                    // about which half was wrong.
-                    res.set('WWW-Authenticate', `Basic realm="${realm}", charset="UTF-8"`)
-                    return res.status(401).json({ error: 'invalid_grant' })
-                }
-
-                const origin = issuer ?? `${req.protocol}://${req.get('host')}`
-                const token = await issueToken({
-                    key,
-                    issuer:   origin,
-                    audience: audience ?? origin,
-                    subject:  principal.subject,
-                    // Always from the files, never from the request — the
-                    // invariant the whole scope-only enforcement rests on.
-                    // The row filter rides along for the same reason: a
-                    // caller must not be able to widen it.
-                    capabilities: principal.capabilities,
-                    scope:        principal.scope,
-                    ttl,
-                })
-
-                res.json({
-                    access_token: token,
-                    token_type:   'Bearer',
-                    expires_in:   typeof ttl === 'number' ? ttl : 3600,
-                    scope:        principal.capabilities.join(' '),
-                })
+            mountRoutes(router, {
+                base,
+                clients:  registeredClients,
+                appName:  appName ?? runtime.config?.name,
+                logoUrl:  logo ?? `${base}/logo.svg`,
+                realm,
+                ttl,
+                ready,
+                issuerFor:   originOf,
+                audienceFor: (req) => audience ?? originOf(req),
+                logger,
             })
 
             app.use(base, router)
+
+            // Codes are 60s and refresh tokens 30d; without a sweep the rows
+            // accumulate for the life of the database. Once at boot is enough
+            // for a build tool — the checks that matter (expiry, single use)
+            // are enforced on read, not by the sweep.
+            try {
+                const swept = grants.sweepExpired()
+                if (swept.codes || swept.refresh) {
+                    logger?.debug?.('auth: swept %d expired code(s), %d refresh token(s)',
+                        swept.codes, swept.refresh)
+                }
+            } catch (err) {
+                logger?.debug?.('auth: could not sweep expired grants — %s', err.message)
+            }
 
             registerRoute({
                 path:         base,
@@ -193,10 +163,11 @@ export function auth(options = {}) {
                 reachability: 'public',
                 streaming:    false,
                 label:        'Auth',
-                detail:       `(token, jwks; alg=${ALG})`,
+                detail:       `(authorize, token, jwks; alg=${ALG}, clients=${registeredClients.size})`,
                 authLabel:    'public',
             })
-            logger?.info?.('Auth mounted at %s (users=%s, groups=%s)', base, users, groups)
+            logger?.info?.('Auth mounted at %s (users=%s, groups=%s, clients=%d)',
+                base, users, groups, registeredClients.size)
         })
     }
 

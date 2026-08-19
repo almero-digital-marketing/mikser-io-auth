@@ -109,26 +109,72 @@ Mounted at `base` (default `/auth`) when mikser runs with `--server`:
 
 | | |
 | --- | --- |
-| `POST /auth/token` | htpasswd credentials → a JWT. Accepts form/JSON `username`+`password`, or HTTP Basic. |
+| `GET /auth/authorize` | the sign-in page |
+| `POST /auth/authorize` | verify against `users.htpasswd`, redirect back with a code |
+| `POST /auth/token` | `authorization_code`, `refresh_token`, or `password` |
 | `GET /auth/jwks.json` | the public half of the signing key |
 | `GET /auth/.well-known/oauth-authorization-server` | RFC 8414 metadata |
+| `GET /auth/logo.svg` | the mark on the sign-in page |
+
+For a script or CLI, skip the browser entirely:
 
 ```bash
 curl -u alice:alice-pw -X POST https://cms.example.com/auth/token
 ```
 
-## Not implemented yet
+### Clients
 
-**The browser-facing authorization-code + PKCE flow.** What's here is the
-credentials grant: enough for a script, a CLI, or an MCP client configured
-with a token out of band. An MCP client that expects to open a browser and
-log in unattended needs the full authorization server — an `/authorize`
-endpoint, a login form, a code store, and refresh rotation. That's most of
-what WhiteBox's `server-plugin-oauth` is, and it is a deliberate decision
-still open rather than an oversight.
+Declared in config — no Dynamic Client Registration. DCR is convenient for a
+multi-tenant SaaS and a real attack surface for a self-hosted build server.
+Public clients only: PKCE (S256) is required and there is no `client_secret`,
+because a browser or an MCP client cannot keep one.
 
-Also out of scope, deliberately: self-service registration, password reset,
-invites, and any cross-plugin permission catalog.
+```js
+auth({
+    appName: 'GPoint CMS',       // shown on the sign-in page
+    clients: {
+        claude: {
+            name: 'Claude',      // shown as "to give Claude access"
+            redirectUris: ['http://127.0.0.1/callback'],
+        },
+    },
+})
+```
+
+Redirect URIs match exactly, with one exception: RFC 8252 §7.3 requires the
+**port of a loopback URI to be ignored**, because a native client binds an
+ephemeral port it cannot know in advance. Every MCP client that opens a
+browser depends on this. Scheme, host, path, query and fragment still match
+exactly.
+
+### The sign-in page
+
+Deliberately identical to WhiteBox's — same layout, type scale, tokens and
+pending state — because mikser and WhiteBox are the same company's products
+and someone who administers both should not have to wonder which one they are
+looking at. The mark is the only difference, and `logo:` overrides it.
+
+The page names two things, and the second is the one that matters: **which**
+deployment (`appName`), and **who** is asking for access (the client). Without
+the second, signing in to your own site and handing an agent your permissions
+look identical.
+
+### Grants
+
+Authorization codes (60s, single-use) and refresh tokens (30d, rotated on
+every use) live in the engine's sqlite (ADR-0009), under `mikser_auth_*`.
+Identity stays in files; this is session bookkeeping.
+
+The engine wipes that database when its schema stamp changes, so **upgrading
+mikser signs everyone out**. Codes are irrelevant at 60 seconds; re-issuing
+refresh tokens after an engine upgrade is the price of not inventing a second
+persistence story.
+
+## Not implemented
+
+Deliberately out of scope: self-service registration, password reset, invites,
+and any cross-plugin permission catalog. A build server has operators, not
+members.
 
 ## Auth on a mikser endpoint
 
