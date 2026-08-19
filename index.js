@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { registerRoute } from 'mikser-io'
+import { registerRoute, anyOf } from 'mikser-io'
 
 import { createIdentityStore, parseHtpasswd, parseHtgroup, verifyPassword } from './lib/htpasswd.js'
 import { loadOrCreateKey, jwks, ALG } from './lib/keys.js'
@@ -56,7 +56,7 @@ export function auth(options = {}) {
         ttl          = '1h',
         realm        = 'mikser',
         clients      = {},
-        dcr          = false,
+        dcr          = true,
         pruneClientsAfterDays = 30,
         appName,
         logo,
@@ -197,6 +197,29 @@ export function auth(options = {}) {
     })
 
     plugin.store = lazyStore
+
+    // The plugin IS a verifier, accepting either credential:
+    //
+    //     api({ endpoints: { admin: { auth: identity } } })
+    //
+    // rather than making every call site pick basic() or jwt() when the
+    // honest answer is "whichever the caller has". A browser sends Basic, an
+    // agent sends its Bearer, and the two never collide — each verifier
+    // reports "not mine" for the other's scheme, so the composite reaches the
+    // right one. Reach for .basic() or .jwt() only to deliberately EXCLUDE
+    // one, which is rare.
+    const composite = anyOf(plugin.basic(), plugin.jwt())
+    plugin.verify    = (req) => composite.verify(req)
+    plugin.challenge = (req, res) => composite.challenge(req, res)
+    Object.defineProperties(plugin, {
+        // A function's own `name` is non-writable, so plain assignment
+        // throws in a module. defineProperty is the only way to give the
+        // verifier the name that shows up in route logs.
+        name:                 { value: 'auth', configurable: true },
+        authorizationServers: { get: () => composite.authorizationServers },
+        resource:             { get: () => composite.resource },
+        scopesSupported:      { get: () => composite.scopesSupported },
+    })
 
     return plugin
 }

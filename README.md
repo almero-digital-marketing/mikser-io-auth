@@ -54,33 +54,59 @@ plugs in, because it implements the same contract:
 
 ## Use
 
-```js
-import { auth }   from 'mikser-io-auth'
-import { api }    from 'mikser-io'
-import { mcp }    from 'mikser-io-mcp'
+The whole thing, minimally:
 
+```js
+import { auth } from 'mikser-io-auth'
+import { api }  from 'mikser-io'
+import { mcp }  from 'mikser-io-mcp'
+
+const identity = auth()
+
+export default async () => ({
+    plugins: [
+        identity,
+        api({ endpoints: { admin:  { auth: identity } } }),
+        mcp({ endpoints: { remote: { auth: identity } } }),
+    ],
+})
+```
+
+That is a working setup. `htpasswd -B -c users.htpasswd alice` and you can
+sign in; an agent can self-register and connect. Everything below is
+optional and narrows what you already have.
+
+`identity` is both the plugin and the verifier, so `auth: identity` accepts
+whichever credential the caller has — Basic from a browser, Bearer from an
+agent. Use `identity.basic()` or `identity.jwt()` only to deliberately
+exclude one.
+
+With no capability map configured, an authenticated user is **unscoped**:
+the endpoint's own `operations` list is the only limit, exactly as for a
+static token. Add capabilities when you want them to mean something:
+
+```js
 const identity = auth({
-    // paths are relative to the working folder
+    // paths are relative to the working folder; these are the defaults
     users:  'users.htpasswd',
     groups: 'groups.htgroup',
     key:    'auth.key',
 
     // groups → capabilities. The files stay pure identity; this decides
-    // what a group is allowed to do.
+    // what a group is allowed to do. Once this exists, a user whose groups
+    // grant nothing can do nothing.
     capabilities: {
         editors: ['api:update', 'mcp:use'],
         admins:  ['api:update', 'api:delete', 'mcp:use'],
     },
 
-    issuer: 'https://cms.example.com',
-})
+    // groups → rows, ANDed with the endpoint's own query
+    scopes: {
+        editors: { 'meta.href': { $regex: '^/web' } },
+    },
 
-export default async () => ({
-    plugins: [
-        identity,
-        api({ endpoints: { admin:  { auth: identity.basic() } } }),
-        mcp({ endpoints: { remote: { auth: identity.jwt() } } }),
-    ],
+    appName: 'GPoint CMS',       // shown on the sign-in page
+    issuer:  'https://cms.example.com',
 })
 ```
 
@@ -123,25 +149,22 @@ For a script or CLI, skip the browser entirely:
 curl -u alice:alice-pw -X POST https://cms.example.com/auth/token
 ```
 
-### Clients — any agent, two ways in
+### Clients — any agent, nothing to configure
+
+Agents register themselves (RFC 7591), which is on by default. An agent
+whose UI takes a URL and nothing else has no field to type a `client_id`
+into: it registers or it cannot connect at all. There is no list to
+maintain and no per-agent redirect to write down — the agent supplies its
+own, and it is checked.
+
+Declare a client only to pin an id you choose yourself:
 
 ```js
 auth({
-    appName: 'GPoint CMS',       // shown on the sign-in page
-
-    // 1. Declared by an operator. Precise, auditable, and the only way to
-    //    pin a client_id you choose yourself.
     clients: {
-        claude: {
-            name: 'Claude',      // shown as "to give Claude access"
-            redirectUris: ['http://127.0.0.1/callback'],
-        },
+        claude: { name: 'Claude', redirectUris: ['http://127.0.0.1/callback'] },
     },
-
-    // 2. Declared by the agent itself (RFC 7591). Required for any agent
-    //    whose UI takes a URL and nothing else — it has no field to type a
-    //    client_id into, so it registers or it cannot connect at all.
-    dcr: true,                   // or { maxPerIp, windowMs, maxClients }
+    dcr: false,                  // or { maxPerIp, windowMs, maxClients }
 })
 ```
 

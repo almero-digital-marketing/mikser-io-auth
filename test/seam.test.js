@@ -99,3 +99,66 @@ describe('verifiers satisfy the engine seam', () => {
         assert.equal((await authorize(req(`Bearer ${token}`), v)).ok, false)
     })
 })
+
+describe('the plugin is itself a verifier — one line at the call site', () => {
+    // The config burden this removes: every gated endpoint used to have to
+    // pick .basic() or .jwt() when the honest answer is "whichever the
+    // caller has".
+    it('resolveAuth takes it unchanged, despite being a function', async () => {
+        const { auth } = await import('../index.js')
+        const identity = auth({})
+        assert.equal(typeof identity, 'function', 'still the plugin')
+        assert.equal(resolveAuth(identity), identity, 'and also the verifier')
+    })
+
+    it('reports "nothing presented" with no credential, so loopback policy still applies', async () => {
+        const { auth } = await import('../index.js')
+        assert.equal(await auth({}).verify(req(null)), null)
+    })
+
+    it('routes each scheme to the verifier that owns it', async () => {
+        // Basic and Bearer never collide: each verifier reports "not mine"
+        // for the other's scheme, so the composite reaches the right one
+        // rather than the first one.
+        const { basic, jwt } = await import('../lib/verifiers.js')
+        const composite = (await import('mikser-io')).anyOf(
+            basic({ store }),
+            jwt({ verifyToken: createTokenVerifier({ key, issuer: ISSUER, audience: ISSUER }), issuer: ISSUER }),
+        )
+        const viaBasic = await composite.verify(req(`Basic ${b64('alice:alice-pw')}`))
+        assert.equal(viaBasic.subject, 'alice')
+
+        const token = await issueToken({
+            key, issuer: ISSUER, audience: ISSUER, subject: 'alice', capabilities: ['api:update'],
+        })
+        const viaBearer = await composite.verify(req(`Bearer ${token}`))
+        assert.equal(viaBearer.subject, 'alice')
+        assert.deepEqual(viaBearer.capabilities, ['api:update'])
+    })
+})
+
+describe('the simplest possible setup', () => {
+    it('with no capability map, an authenticated user behaves like a static token', async () => {
+        // capabilities: null means "not capability-scoped" — the endpoint's
+        // own `operations` list is the only limit, exactly as for a bare
+        // token. Returning [] here would authenticate people and then refuse
+        // them everything, making the capability map effectively mandatory.
+        const { hasCapability } = await import('mikser-io')
+        const bare = createIdentityStore({ usersFile: path.join(dir, 'users.htpasswd') })
+        const p = await bare.authenticate('alice', 'alice-pw')
+        assert.equal(p.capabilities, null)
+        assert.equal(hasCapability(p, 'api:delete'), true)
+    })
+
+    it('once a capability map exists, an ungranted user is refused rather than unscoped', async () => {
+        const { hasCapability } = await import('mikser-io')
+        const scoped = createIdentityStore({
+            usersFile:  path.join(dir, 'users.htpasswd'),
+            groupsFile: path.join(dir, 'groups.htgroup'),
+            groups:     { someone_else: ['api:delete'] },
+        })
+        const p = await scoped.authenticate('alice', 'alice-pw')
+        assert.deepEqual(p.capabilities, [])
+        assert.equal(hasCapability(p, 'api:delete'), false)
+    })
+})

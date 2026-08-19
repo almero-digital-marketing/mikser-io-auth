@@ -149,10 +149,20 @@ describe('createIdentityStore', () => {
         assert.equal(await s.authenticate('alice', 'alice-pw'), null)
     })
 
-    it('works with no groups file at all', async () => {
+    it('works with no groups file at all, leaving the user unscoped', async () => {
+        // No capability map configured → null, "not capability-scoped",
+        // the same thing a bare static token reports. [] would mean "no
+        // verbs at all", which would refuse everything to everyone in the
+        // simplest possible setup.
         const s = createIdentityStore({ usersFile })
         const p = await s.authenticate('alice', 'alice-pw')
         assert.equal(p.subject, 'alice')
+        assert.equal(p.capabilities, null)
+    })
+
+    it('still reports [] for an ungranted user once a capability map exists', async () => {
+        const s = createIdentityStore({ usersFile, groupsFile, groups: { nobody: ['api:list'] } })
+        const p = await s.authenticate('alice', 'alice-pw')
         assert.deepEqual(p.capabilities, [])
     })
 })
