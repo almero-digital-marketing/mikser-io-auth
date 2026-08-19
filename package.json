@@ -26,7 +26,7 @@
   },
   "homepage": "https://github.com/almero-digital-marketing/mikser-io-auth#readme",
   "peerDependencies": {
-    "mikser-io": "^9.0.0"
+    "mikser-io": "^9.4.0"
   },
   "dependencies": {
     "bcryptjs": "^3.0.0",
