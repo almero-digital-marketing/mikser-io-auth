@@ -220,10 +220,36 @@ Authorization codes (60s, single-use) and refresh tokens (30d, rotated on
 every use) live in the engine's sqlite (ADR-0009), under `mikser_auth_*`.
 Identity stays in files; this is session bookkeeping.
 
-The engine wipes that database when its schema stamp changes, so **upgrading
-mikser signs everyone out**. Codes are irrelevant at 60 seconds; re-issuing
-refresh tokens after an engine upgrade is the price of not inventing a second
-persistence story.
+The engine wipes that database when its schema stamp or config checksum
+changes — an upgrade, or any deploy that edits `mikser.config.js`. These
+tables are registered `durable: true`, so the wipe drops table by table and
+keeps them: a registered client and its refresh token exist only because a
+human completed a sign-in once, and they are not something the working folder
+can rebuild.
+
+### When an access token expires
+
+Access tokens are short (`ttl`, default `1h`) and refresh tokens are long, so
+a client is expected to notice the expiry and exchange quietly. It can only do
+that if the resource server *says* which failure it hit, and the vocabulary is
+RFC 6750 §3.1:
+
+| Situation | Status | `WWW-Authenticate` | What a client should do |
+| --- | --- | --- | --- |
+| no credential presented | 401 | no `error` — the omission is the signal | start a sign-in |
+| access token expired | 401 | `error="invalid_token"`, `error_description="The access token expired"` | exchange the refresh token, retry |
+| token malformed, wrong audience, wrong key | 401 | `error="invalid_token"` | sign in again; refreshing will not help |
+| token valid, subject lacks the capability | 403 | `error="insufficient_scope"`, `scope="<capability>"` | do NOT refresh — a fresh token is refused identically |
+
+All four used to be one byte-identical 401. A client cannot tell "your token
+went stale" from "you have never authenticated here" in that state, so it does
+the safe thing and starts a whole new authorization flow — a human, a browser,
+mid-task, with a perfectly good refresh token in hand.
+
+The verifier reports which one it hit through `rejectionFor(req)`, an optional
+method on the engine's ADR-0012 verifier contract. It can only *narrow* a
+denial that has already happened; there is nothing it can return that turns a
+rejection into an acceptance.
 
 ## Not implemented
 

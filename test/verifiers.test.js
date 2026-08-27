@@ -152,6 +152,86 @@ describe('jwt verifier', () => {
         assert.deepEqual(v.authorizationServers, [issuer])
         assert.deepEqual(v.scopesSupported, ['mcp:use'])
     })
+
+    // An expired token and a request that never carried one both come back
+    // `false` — the ADR-0012 contract is three-valued and that is on purpose.
+    // But they are OPPOSITE instructions to a client: one is fixed silently
+    // with a refresh token, the other needs a human and a browser. Told apart
+    // through rejectionFor, which only ever refines a denial.
+    describe('rejectionFor tells the client what to do next', () => {
+        it('names an expired token as expired', async () => {
+            const v = verifier()
+            const r = req(`Bearer ${await mint({ ttl: '-1s' })}`)
+            assert.equal(await v.verify(r), false)
+            const rejection = v.rejectionFor(r)
+            assert.equal(rejection.status, 401)
+            assert.equal(rejection.code, 'invalid_token')
+            assert.equal(rejection.expired, true)
+        })
+
+        it('does NOT claim expiry for a token this server will never accept', async () => {
+            // A client that reads "expired" here burns its refresh token on a
+            // request that fails identically afterwards.
+            const v = verifier()
+            for (const header of ['Bearer not.a.jwt', `Bearer ${await mint({ audience: 'https://elsewhere' })}`]) {
+                const r = req(header)
+                assert.equal(await v.verify(r), false)
+                assert.equal(v.rejectionFor(r).code, 'invalid_token')
+                assert.notEqual(v.rejectionFor(r).expired, true)
+            }
+        })
+
+        it('answers 403 insufficient_scope when the token is good but unauthorized', async () => {
+            const v = verifier({ requiredCapability: 'api:delete' })
+            const r = req(`Bearer ${await mint()}`)
+            assert.equal(await v.verify(r), false)
+            const rejection = v.rejectionFor(r)
+            // Refreshing cannot fix this, and a client that tries loops.
+            assert.equal(rejection.status, 403)
+            assert.equal(rejection.code, 'insufficient_scope')
+            assert.equal(rejection.scope, 'api:delete')
+        })
+
+        it('leaves no rejection behind when the token is accepted', async () => {
+            const v = verifier()
+            const r = req(`Bearer ${await mint()}`)
+            assert.ok(await v.verify(r))
+            assert.equal(v.rejectionFor(r), undefined)
+        })
+
+        it('does not leak one request\'s reason to another', async () => {
+            // The verifier instance is shared across concurrent requests; a
+            // reason kept in its closure would answer for the wrong caller.
+            const v = verifier()
+            const bad = req(`Bearer ${await mint({ ttl: '-1s' })}`)
+            const good = req(`Bearer ${await mint()}`)
+            await v.verify(bad)
+            await v.verify(good)
+            assert.equal(v.rejectionFor(good), undefined)
+            assert.equal(v.rejectionFor(bad).expired, true)
+        })
+
+        it('carries the reason into the WWW-Authenticate header', async () => {
+            const v = verifier()
+            const r = req(`Bearer ${await mint({ ttl: '-1s' })}`)
+            await v.verify(r)
+            const res = { headers: {}, set(k, val) { this.headers[k] = val } }
+            v.challenge(r, res, { code: 'invalid_token', description: 'The access token expired' })
+            const header = res.headers['WWW-Authenticate']
+            assert.match(header, /error="invalid_token"/)
+            assert.match(header, /error_description="The access token expired"/)
+        })
+
+        it('omits error entirely when nothing was presented', async () => {
+            // The omission IS the signal for "you have never authenticated
+            // here" — writing invalid_token would send a client to refresh a
+            // token it does not have.
+            const v = verifier()
+            const res = { headers: {}, set(k, val) { this.headers[k] = val } }
+            v.challenge(req(null), res, { reason: 'missing' })
+            assert.doesNotMatch(res.headers['WWW-Authenticate'], /error=/)
+        })
+    })
 })
 
 describe('row scope survives the JWT round trip', () => {
