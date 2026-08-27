@@ -340,6 +340,34 @@ describe('discovery', () => {
         assert.ok(doc.grant_types_supported.includes('authorization_code'))
     })
 
+    // RFC 8414 §3.1: the metadata for an issuer with no path component lives
+    // at <origin>/.well-known/oauth-authorization-server. The document names
+    // the origin as its issuer, so serving it only under /auth makes it
+    // unreachable at the one address a conforming client derives — and every
+    // MCP client is a conforming client, sent here by the resource's RFC 9728
+    // document. Dynamic registration then fails with the metadata present.
+    it('serves the metadata at the origin, where the issuer it declares says it is', async () => {
+        const res = await fetch(url('/.well-known/oauth-authorization-server'))
+        assert.equal(res.status, 200)
+        const doc = await res.json()
+        assert.match(doc.registration_endpoint, /\/auth\/register$/)
+    })
+
+    it('is reachable by deriving the URL from the issuer it declares', async () => {
+        const doc = await (await fetch(url('/auth/.well-known/oauth-authorization-server'))).json()
+        // What a client actually does: take `issuer`, append the well-known
+        // path, fetch. If that 404s, discovery is broken however correct the
+        // document's contents are.
+        const derived = await fetch(`${doc.issuer}/.well-known/oauth-authorization-server`)
+        assert.equal(derived.status, 200)
+    })
+
+    it('serves the same document at both mounts', async () => {
+        const atBase = await (await fetch(url('/auth/.well-known/oauth-authorization-server'))).json()
+        const atRoot = await (await fetch(url('/.well-known/oauth-authorization-server'))).json()
+        assert.deepEqual(atRoot, atBase)
+    })
+
     it('publishes a JWKS with no private component', async () => {
         const doc = await (await fetch(url('/auth/jwks.json'))).json()
         assert.equal(doc.keys.length, 1)

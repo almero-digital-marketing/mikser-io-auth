@@ -8,7 +8,7 @@ import { basic, jwt } from './lib/verifiers.js'
 import { redirectUriAllowed, validateRedirectUri, registerDynamicClient } from './lib/clients.js'
 import { challengeFromVerifier, verifyPkce, opaqueToken } from './lib/pkce.js'
 import { loginPage } from './lib/login-page.js'
-import { mountRoutes } from './lib/routes.js'
+import { mountRoutes, metadataHandler } from './lib/routes.js'
 import * as grants from './lib/grants.js'
 
 export { parseHtpasswd, parseHtgroup, verifyPassword, createIdentityStore }
@@ -151,6 +151,22 @@ export function auth(options = {}) {
             })
 
             app.use(base, router)
+
+            // RFC 8414 §3.1: an issuer with no path component publishes its
+            // metadata at <origin>/.well-known/oauth-authorization-server.
+            // `issuerFor` is the origin, so that is where a conforming client
+            // looks — including every MCP client, which is sent here by the
+            // resource's RFC 9728 document naming this issuer. Mounted under
+            // `base` alone, the document exists but at an address nothing
+            // following the spec will ask for, and dynamic client
+            // registration fails with the metadata sitting right there.
+            //
+            // The copy under `base` stays: clients that append to the issuer
+            // rather than insert the well-known segment find it there.
+            if (base && base !== '/') {
+                app.get('/.well-known/oauth-authorization-server',
+                    metadataHandler({ base, issuerFor: originOf }))
+            }
 
             // Codes are 60s and refresh tokens 30d; without a sweep the rows
             // accumulate for the life of the database. Once at boot is enough
