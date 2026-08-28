@@ -159,6 +159,7 @@ export function auth(options = {}) {
                 issuerFor:   originOf,
                 audienceFor: (req) => audience ?? originOf(req),
                 dcr,
+                scopes: [...new Set(Object.values(capabilities).flat())],
                 logger,
             })
 
@@ -177,7 +178,8 @@ export function auth(options = {}) {
             // rather than insert the well-known segment find it there.
             if (base && base !== '/') {
                 app.get('/.well-known/oauth-authorization-server',
-                    metadataHandler({ base, issuerFor: originOf }))
+                    metadataHandler({ base, issuerFor: originOf,
+                        scopes: [...new Set(Object.values(capabilities).flat())] }))
             }
 
             // Codes are 60s and refresh tokens 30d; without a sweep the rows

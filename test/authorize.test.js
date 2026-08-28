@@ -242,7 +242,13 @@ describe('POST /token — authorization_code', () => {
         const body = await res.json()
         assert.equal(body.token_type, 'Bearer')
         assert.ok(body.refresh_token)
-        assert.equal(body.scope, 'api:list api:update')
+        // offline_access rides along BECAUSE a refresh token was issued. Per
+        // RFC 6749 §5.1 the response scope is what the client was granted, and
+        // handing over a refresh token while reporting a scope without
+        // offline_access tells a conforming client it was refused — so it does
+        // not renew, and the window becomes a hard one-hour cliff.
+        assert.equal(body.scope, 'api:list api:update offline_access')
+        assert.ok(body.refresh_token, 'the grant that says offline_access must actually issue one')
 
         const claims = JSON.parse(Buffer.from(body.access_token.split('.')[1], 'base64url').toString())
         assert.equal(claims.sub, 'alice')
@@ -450,7 +456,7 @@ describe('POST /register — any agent, no operator config (RFC 7591)', () => {
             redirect_uri: 'http://127.0.0.1:7788/cb',
             code_verifier: verifier, client_id: reg.client_id,
         })).json()
-        assert.equal(tok.scope, 'api:list api:update')
+        assert.equal(tok.scope, 'api:list api:update offline_access')
     })
 
     it('escapes a client name — it is attacker-controlled and lands on the page', async () => {
@@ -599,5 +605,81 @@ describe('an expired access token is recoverable without a human', () => {
         const header = denied.headers.get('www-authenticate')
         assert.match(header, /error="insufficient_scope"/)
         assert.match(header, /scope="api:delete"/)
+    })
+})
+
+// A fixed one-hour window that never renewed, and a human re-authorizing by
+// hand — twice in one working session, the second time between a finished
+// decision and the write that would have applied it.
+//
+// The refresh token was there the whole time. What was missing was the sentence
+// that tells a client it may use one.
+describe('unattended renewal is granted out loud, not just made possible', () => {
+    it('advertises offline_access, so a client can discover it exists', async () => {
+        const meta = await (await fetch(url('/auth/.well-known/oauth-authorization-server'))).json()
+        assert.ok(meta.scopes_supported, 'RFC 8414 §2 RECOMMENDS scopes_supported; without it nothing is discoverable')
+        assert.ok(meta.scopes_supported.includes('offline_access'))
+        // The deployment's real capabilities are listed too, so a client can
+        // see what it is allowed to ask for rather than guessing.
+        assert.ok(meta.scopes_supported.includes('api:update'))
+        assert.ok(meta.grant_types_supported.includes('refresh_token'))
+    })
+
+    it('grants offline_access exactly when it hands over a refresh token', async () => {
+        const { verifier, challenge } = pkcePair()
+        const res = await signIn(challenge, { username: 'alice', password: 'alice-pw' })
+        const code = new URL(res.headers.get('location')).searchParams.get('code')
+        const body = await (await token({
+            grant_type: 'authorization_code', code, redirect_uri: REDIRECT,
+            client_id: CLIENT, code_verifier: verifier,
+        })).json()
+        assert.ok(body.refresh_token)
+        assert.ok(body.scope.split(' ').includes('offline_access'),
+            'handing over a refresh token while reporting a scope without offline_access tells a '
+            + 'conforming client it was REFUSED, so it never renews')
+    })
+
+    it('does NOT claim it for a grant that issues no refresh token', async () => {
+        // The password grant deliberately issues none — a caller that can
+        // replay the password does not need one. Claiming offline_access there
+        // would promise renewal that cannot happen.
+        const body = await (await token({
+            grant_type: 'password', username: 'alice', password: 'alice-pw',
+        })).json()
+        assert.equal(body.refresh_token, undefined)
+        assert.equal(body.scope.split(' ').includes('offline_access'), false)
+    })
+
+    it('keeps offline_access OUT of the token claims, because it grants no access', async () => {
+        // It is a property of the grant, not a capability. A resource server
+        // checking capabilities must never see it in the list, or it becomes a
+        // permission nobody meant to give.
+        const { verifier, challenge } = pkcePair()
+        const res = await signIn(challenge, { username: 'alice', password: 'alice-pw' })
+        const code = new URL(res.headers.get('location')).searchParams.get('code')
+        const body = await (await token({
+            grant_type: 'authorization_code', code, redirect_uri: REDIRECT,
+            client_id: CLIENT, code_verifier: verifier,
+        })).json()
+        const claims = JSON.parse(Buffer.from(body.access_token.split('.')[1], 'base64url').toString())
+        assert.equal(claims.scope, 'api:list api:update')
+        assert.equal(String(claims.scope).includes('offline_access'), false)
+    })
+
+    it('keeps granting it on refresh, so renewal does not decay after one hop', async () => {
+        // A rotated refresh token that came back without offline_access would
+        // renew exactly once and then look refused.
+        const { verifier, challenge } = pkcePair()
+        const res = await signIn(challenge, { username: 'alice', password: 'alice-pw' })
+        const code = new URL(res.headers.get('location')).searchParams.get('code')
+        const first = await (await token({
+            grant_type: 'authorization_code', code, redirect_uri: REDIRECT,
+            client_id: CLIENT, code_verifier: verifier,
+        })).json()
+        const second = await (await token({
+            grant_type: 'refresh_token', refresh_token: first.refresh_token, client_id: CLIENT,
+        })).json()
+        assert.ok(second.refresh_token)
+        assert.ok(second.scope.split(' ').includes('offline_access'))
     })
 })
