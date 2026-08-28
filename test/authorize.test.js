@@ -51,7 +51,19 @@ before(async () => {
     for (const hook of runtime.hooks.initialize) await hook()
     for (const hook of runtime.hooks.loaded) await hook()
 
-    runtime.options.url = 'https://test-mikser.example'
+    // Listen FIRST, then declare that origin as the deployment's URL.
+    //
+    // A deployment whose `url` is not where it actually serves is not a
+    // configuration anyone runs, and pretending otherwise hid a real
+    // asymmetry: the token minter derived issuer/audience from the request
+    // while the verifier was pinned to `runtime.options.url`. With the two
+    // disagreeing, every minted token failed verification — which from a
+    // client looks exactly like expiry.
+    server = await new Promise(resolve => {
+        const s = app.listen(0, () => resolve(s))
+    })
+    port = server.address().port
+    runtime.options.url = `http://127.0.0.1:${port}`
 
     const plugin = auth({
         capabilities: { editors: ['api:list', 'api:update'] },
@@ -69,10 +81,13 @@ before(async () => {
     for (const cb of load)   await cb()
     for (const cb of loaded) await cb()
 
-    server = await new Promise(resolve => {
-        const s = app.listen(0, () => resolve(s))
-    })
-    port = server.address().port
+    // A protected resource on the same app, gated by the plugin ITSELF —
+    // `auth: identity`, which is the documented shape. Gating with
+    // identity.jwt() instead would test a path most deployments do not take.
+    const { requireAuth } = await import('mikser-io')
+    app.get('/resource', requireAuth(plugin), (req, res) => res.json({ subject: req.principal.subject }))
+    app.get('/resource-admin', requireAuth(plugin.jwt({ requiredCapability: 'api:delete' })),
+        (req, res) => res.json({ ok: true }))
 
     const reg = await fetch(`http://127.0.0.1:${port}/auth/register`, {
         method: 'POST',
@@ -128,7 +143,9 @@ describe('GET /authorize — the login page', () => {
         assert.equal(res.status, 200)
         assert.match(res.headers.get('content-type'), /text\/html/)
         const html = await res.text()
-        assert.match(html, /Sign in to test-mikser\.example/)
+        // The deployment is named by its own declared URL's host, which the
+        // fixture now serves at rather than merely claiming.
+        assert.match(html, new RegExp(`Sign in to ${new URL(runtime.options.url).host.replace('.', '\\.')}`))
         assert.match(html, /to give <strong>Test Client<\/strong> access/)
         assert.match(html, /name="username"[^>]*autocomplete="username"/)
         assert.match(html, /autocomplete="current-password"/)
@@ -475,5 +492,112 @@ describe('POST /register — any agent, no operator config (RFC 7591)', () => {
                                 { redirect: 'manual' })
         assert.equal(res.status, 400)
         assert.equal(res.headers.get('location'), null)
+    })
+})
+
+// The loop a real client runs, end to end. Rotation is covered above; this is
+// the part that was never exercised — whether a client can TELL that it should
+// rotate, and complete the round trip without a human.
+//
+// The failure this pins down: an access token expiring mid-task, between a
+// finished decision and the write that would apply it. Refresh tokens were
+// being issued the whole time; nothing told the client the moment to use one.
+describe('an expired access token is recoverable without a human', () => {
+    let refreshToken, key, issuer
+
+    before(async () => {
+        const { verifier, challenge } = pkcePair()
+        const res = await signIn(challenge, { username: 'alice', password: 'alice-pw' })
+        const code = new URL(res.headers.get('location')).searchParams.get('code')
+        const body = await (await token({
+            grant_type: 'authorization_code', code, redirect_uri: REDIRECT,
+            client_id: CLIENT, code_verifier: verifier,
+        })).json()
+        refreshToken = body.refresh_token
+        assert.ok(refreshToken, 'the authorization_code grant must issue a refresh token')
+
+        // Mint an already-expired token for the same subject with the same
+        // key — the state the client reaches an hour later, without waiting
+        // an hour for it.
+        const { loadOrCreateKey } = await import('../lib/keys.js')
+        // The same issuer the running deployment declares — a token minted
+        // for any other one fails verification rather than expiring, which is
+        // the confusion this whole block exists to rule out.
+        issuer = runtime.options.url
+        key = await loadOrCreateKey({ keyFile: path.join(dir, 'auth.key') })
+    })
+
+    const mintExpired = async () => {
+        const { issueToken } = await import('../lib/tokens.js')
+        return issueToken({
+            key, issuer, audience: issuer, subject: 'alice',
+            capabilities: ['api:list', 'api:update'], ttl: '-1s',
+        })
+    }
+
+    it('the resource says WHICH failure it was, not just that there was one', async () => {
+        const expired = await mintExpired()
+        const res = await fetch(url('/resource'), { headers: { authorization: `Bearer ${expired}` } })
+        assert.equal(res.status, 401)
+        const header = res.headers.get('www-authenticate')
+        // The one field a client's refresh logic reads.
+        assert.match(header, /error="invalid_token"/)
+        assert.match(header, /error_description="The access token expired"/)
+    })
+
+    it('and does NOT say it for a request that carried no credential', async () => {
+        // The omission is the signal for "you have never authenticated here".
+        // Claiming invalid_token would send a client to refresh a token it
+        // does not hold.
+        const res = await fetch(url('/resource'))
+        assert.equal(res.status, 401)
+        assert.doesNotMatch(res.headers.get('www-authenticate') ?? '', /error=/)
+    })
+
+    it('completes the whole loop: expire → read the signal → exchange → retry', async () => {
+        const expired = await mintExpired()
+
+        // 1. The call the agent actually wanted to make.
+        const denied = await fetch(url('/resource'), { headers: { authorization: `Bearer ${expired}` } })
+        assert.equal(denied.status, 401)
+
+        // 2. A client decides to refresh ONLY because of this.
+        assert.match(denied.headers.get('www-authenticate'), /error="invalid_token"/)
+
+        // 3. Exchange, with no human anywhere in it.
+        const refreshed = await token({
+            grant_type: 'refresh_token', refresh_token: refreshToken, client_id: CLIENT,
+        })
+        assert.equal(refreshed.status, 200)
+        const body = await refreshed.json()
+        assert.ok(body.access_token)
+        refreshToken = body.refresh_token
+
+        // 4. The retry the whole exercise is for.
+        const retried = await fetch(url('/resource'), {
+            headers: { authorization: `Bearer ${body.access_token}` },
+        })
+        assert.equal(retried.status, 200)
+        assert.equal((await retried.json()).subject, 'alice')
+    })
+
+    it('tells a client NOT to refresh when the token is fine but unauthorized', async () => {
+        // A fresh token for the same subject is refused identically, so a
+        // client that reads this as an expiry loops forever.
+        const { verifier, challenge } = pkcePair()
+        const res = await signIn(challenge, { username: 'alice', password: 'alice-pw' })
+        const code = new URL(res.headers.get('location')).searchParams.get('code')
+        const { access_token } = await (await token({
+            grant_type: 'authorization_code', code, redirect_uri: REDIRECT,
+            client_id: CLIENT, code_verifier: verifier,
+        })).json()
+
+        const denied = await fetch(url('/resource-admin'), {
+            headers: { authorization: `Bearer ${access_token}` },
+        })
+        assert.equal(denied.status, 403)
+        const header = denied.headers.get('www-authenticate')
+        assert.match(header, /error="insufficient_scope"/)
+        assert.match(header, /scope="api:delete"/)
     })
 })

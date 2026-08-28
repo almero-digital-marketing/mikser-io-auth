@@ -123,7 +123,19 @@ export function auth(options = {}) {
             router.use(express.urlencoded({ extended: false, limit: '8kb' }))
             router.use(express.json({ limit: '8kb' }))
 
-            const originOf = (req) => issuer ?? `${req.protocol}://${req.get('host')}`
+            // The deployment's identity, and it must be the SAME string the
+            // verifier was built with — a token minted for one issuer and
+            // checked against another fails verification, which from the
+            // outside is indistinguishable from an expired token. The
+            // verifier is pinned to `issuer ?? runtime.options.url` at load,
+            // so this resolves in that order too and only falls back to the
+            // request when neither is configured (a dev box with no --url).
+            //
+            // RFC 8414 §2 wants a stable issuer besides: clients cache the
+            // metadata document keyed by it, so deriving it per-request makes
+            // one deployment look like several.
+            const originOf = (req) =>
+                issuer ?? runtime.options.url ?? `${req.protocol}://${req.get('host')}`
 
             // What the sign-in page calls this deployment. Not a config
             // option: mikser already knows its external URL, and failing
@@ -231,7 +243,14 @@ export function auth(options = {}) {
     // one, which is rare.
     const composite = anyOf(plugin.basic(), plugin.jwt())
     plugin.verify    = (req) => composite.verify(req)
-    plugin.challenge = (req, res) => composite.challenge(req, res)
+    // Both forwarded WITH their arguments. Dropping either is silent: the
+    // endpoint still denies correctly, it just stops saying which denial it
+    // was — so an expiry a refresh token would have fixed reads as a fresh
+    // sign-in, which is the whole failure this vocabulary exists to prevent.
+    // `auth: identity` is the documented shape, so a gap here bypasses the
+    // signal in the configuration almost everyone uses.
+    plugin.rejectionFor = (req) => composite.rejectionFor?.(req)
+    plugin.challenge = (req, res, outcome) => composite.challenge(req, res, outcome)
     Object.defineProperties(plugin, {
         // A function's own `name` is non-writable, so plain assignment
         // throws in a module. defineProperty is the only way to give the
