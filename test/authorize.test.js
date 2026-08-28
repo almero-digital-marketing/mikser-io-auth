@@ -683,3 +683,127 @@ describe('unattended renewal is granted out loud, not just made possible', () =>
         assert.ok(second.scope.split(' ').includes('offline_access'))
     })
 })
+
+// A token narrower than the caller's own, for one job.
+//
+// The property that makes this safe to expose to an agent at all: it can only
+// ever NARROW. There is no argument that widens anyone's reach, and asking for
+// more than you hold is refused rather than trimmed silently.
+describe('minted tokens', () => {
+    let identity
+    before(async () => {
+        // The plugin object is the verifier and carries the minting surface.
+        identity = runtime.options.auth
+        assert.ok(identity?.mint, 'the auth plugin must publish a minting surface')
+    })
+
+    const claimsOf = (token) =>
+        JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
+
+    it('mints only what the caller already holds', async () => {
+        const m = await identity.mint({
+            subject: 'alice', capabilities: ['api:list', 'api:update'],
+            request: ['api:list'], ttlSec: 60, purpose: 'test',
+        })
+        assert.deepEqual(claimsOf(m.token).scope.split(' '), ['api:list'])
+        assert.ok(m.jti, 'a minted token must carry a jti, or it cannot be revoked')
+    })
+
+    it('refuses to mint a scope the caller lacks, and names it', async () => {
+        await assert.rejects(
+            () => identity.mint({
+                subject: 'alice', capabilities: ['api:list'],
+                request: ['api:list', 'api:delete'], ttlSec: 60,
+            }),
+            (err) => {
+                assert.match(err.message, /api:delete/)
+                assert.deepEqual(err.missing, ['api:delete'])
+                return true
+            })
+    })
+
+    it('refuses a caller whose capabilities are not enumerable', async () => {
+        // `capabilities: null` is a static token — not capability-scoped. It
+        // cannot delegate what it cannot enumerate, and minting something
+        // unbounded from it would be the opposite of the point.
+        await assert.rejects(
+            () => identity.mint({ subject: 'x', capabilities: null, request: ['api:list'], ttlSec: 60 }),
+            /no enumerable capabilities/)
+    })
+
+    it('works against a real gated resource, and STOPS the moment it is revoked', async () => {
+        // Through the actual gate, not through the verifier in isolation: what
+        // matters is whether a request carrying it gets in.
+        const m = await identity.mint({
+            subject: 'alice', capabilities: ['api:list'], request: ['api:list'], ttlSec: 300,
+        })
+        const hit = () => fetch(url('/resource'), { headers: { authorization: `Bearer ${m.token}` } })
+
+        assert.equal((await hit()).status, 200, 'a fresh minted token must be accepted')
+
+        // A JWT is normally unrevokable before expiry, which is exactly the
+        // property you do not want in a credential handed to something that
+        // logs its own output.
+        assert.equal(identity.revokeMinted(m.jti), true)
+        assert.equal((await hit()).status, 401, 'revocation must take effect immediately')
+        assert.equal(identity.revokeMinted(m.jti), false, 'revoking twice reports nothing changed')
+    })
+
+    it('FAILS CLOSED when the record is gone', async () => {
+        // Losing the table must revoke, never un-revoke. If a missing row read
+        // as "fine", wiping the cache would silently un-revoke every token
+        // anyone had killed.
+        const { createTokenVerifier } = await import('../lib/tokens.js')
+        const { loadOrCreateKey } = await import('../lib/keys.js')
+        const { issueToken } = await import('../lib/tokens.js')
+        const key = await loadOrCreateKey({ keyFile: path.join(dir, 'auth.key') })
+        const orphan = await issueToken({
+            key, issuer: runtime.options.url, audience: runtime.options.url,
+            subject: 'alice', capabilities: ['api:list'], ttl: '300s', jti: 'never-recorded',
+        })
+        const verify = createTokenVerifier({
+            key, issuer: runtime.options.url, audience: runtime.options.url,
+            mintedTokenUsable: () => false,
+        })
+        await assert.rejects(() => verify(orphan), /revoked or is no longer on record/)
+    })
+
+    it('fails closed when no checker is wired at all', async () => {
+        const { createTokenVerifier, issueToken } = await import('../lib/tokens.js')
+        const { loadOrCreateKey } = await import('../lib/keys.js')
+        const key = await loadOrCreateKey({ keyFile: path.join(dir, 'auth.key') })
+        const token = await issueToken({
+            key, issuer: runtime.options.url, audience: runtime.options.url,
+            subject: 'alice', capabilities: ['api:list'], ttl: '300s', jti: 'anything',
+        })
+        // No mintedTokenUsable passed — a deployment that forgot to wire it
+        // must not accept revokable tokens as if they were unrevokable.
+        const verify = createTokenVerifier({ key, issuer: runtime.options.url, audience: runtime.options.url })
+        await assert.rejects(() => verify(token), /revoked or is no longer on record/)
+    })
+
+    it('leaves a SESSION token alone — no jti, no lookup, no new failure mode', async () => {
+        // Adding revocation must not make ordinary sign-in depend on a table.
+        const { verifier, challenge } = pkcePair()
+        const res = await signIn(challenge, { username: 'alice', password: 'alice-pw' })
+        const code = new URL(res.headers.get('location')).searchParams.get('code')
+        const { access_token } = await (await token({
+            grant_type: 'authorization_code', code, redirect_uri: REDIRECT,
+            client_id: CLIENT, code_verifier: verifier,
+        })).json()
+        assert.equal(claimsOf(access_token).jti, undefined, 'a session token carries no jti')
+        const res2 = await fetch(url('/resource'), { headers: { authorization: `Bearer ${access_token}` } })
+        assert.equal(res2.status, 200)
+    })
+
+    it('lists what has been minted, for an operator to audit or revoke', async () => {
+        const m = await identity.mint({
+            subject: 'carol', capabilities: ['api:list'], request: ['api:list'],
+            ttlSec: 60, purpose: 'audit-probe',
+        })
+        const listed = identity.listMinted('carol').find(x => x.jti === m.jti)
+        assert.equal(listed.purpose, 'audit-probe')
+        assert.deepEqual(listed.scopes, ['api:list'])
+        assert.equal(listed.usable, true)
+    })
+})

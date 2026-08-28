@@ -81,7 +81,20 @@ export function auth(options = {}) {
         reload:          ()     => ready().store.reload(),
     }
 
+    // Captured on first invocation so the surfaces defined below — which are
+    // built at config time, before any hook runs — can reach the engine.
+    let engine = null
+
     const plugin = ({ runtime, onLoad, onLoaded, useLogger }) => {
+        engine = runtime
+        // Published here rather than after the factory, because `runtime` is
+        // only in scope once the plugin has been invoked. mikser-io-webdav
+        // mints through this without importing this package.
+        runtime.options.auth = {
+            mint:         (...args) => plugin.mint(...args),
+            revokeMinted: (jti) => plugin.revokeMinted(jti),
+            listMinted:   (subject) => plugin.listMinted(subject),
+        }
         onLoad(async () => {
             const logger = useLogger()
             const workingFolder = runtime.options.workingFolder
@@ -103,6 +116,10 @@ export function auth(options = {}) {
                     key: signingKey,
                     issuer:   issuer ?? runtime.options.url,
                     audience: audience ?? runtime.options.url,
+                    // Minted tokens are revokable; session tokens carry no jti
+                    // and never reach this, so it costs a lookup only for the
+                    // credentials that need one.
+                    mintedTokenUsable: grants.mintedTokenUsable,
                 }),
                 logger,
             }
@@ -232,6 +249,57 @@ export function auth(options = {}) {
     })
 
     plugin.store = lazyStore
+
+    // Mint a token narrower than the caller's own, for one job.
+    //
+    // Everything about this is deliberately small. The scopes are whatever the
+    // caller asks for INTERSECTED with what they already hold — this can never
+    // widen anyone's reach, only narrow it, which is the property that makes it
+    // safe to expose to an agent at all. It is short-lived, it is revokable by
+    // jti, and it is not refreshable: expiry IS the revocation mechanism, so a
+    // caller whose transfer outlives it mints another rather than renewing one
+    // that has been sitting in a transcript.
+    //
+    // Returns `{ token, jti, scopes, expiresAt, ttl }`, or throws with the
+    // missing scope named when the caller is asking for more than it holds.
+    plugin.mint = async ({ subject, capabilities: held, request, ttlSec, purpose, audience: aud }) => {
+        const { key } = ready()
+        const wanted = [...new Set(request ?? [])]
+        if (!wanted.length) throw new Error('mint: no scopes requested')
+        // `capabilities: null` means "not capability-scoped" — a static token.
+        // Such a caller cannot delegate what it cannot enumerate, so refuse
+        // rather than mint something unbounded.
+        if (!Array.isArray(held)) {
+            throw new Error('mint: the caller holds no enumerable capabilities, so nothing can be delegated from them')
+        }
+        const missing = wanted.filter(scope => !held.includes(scope))
+        if (missing.length) {
+            const err = new Error(`mint refused: you do not hold ${missing.join(', ')}`)
+            err.missing = missing
+            throw err
+        }
+        const jti = opaqueToken()
+        const token = await issueToken({
+            key,
+            issuer:   issuer ?? engine?.options?.url,
+            audience: aud ?? audience ?? engine?.options?.url,
+            subject,
+            capabilities: wanted,
+            ttl: `${ttlSec}s`,
+            jti,
+        })
+        const { expiresAt } = grants.recordMintedToken({ jti, subject, purpose, scopes: wanted, ttlSec })
+        // Every mint is logged: who, what for, how wide, how long. A
+        // credential handed to a machine that no one can account for later is
+        // the thing that makes short expiry necessary in the first place.
+        engine?.engine?.logger?.info?.('auth: minted %ds token for %j — %s [%s]',
+            ttlSec, subject, purpose ?? 'unspecified', wanted.join(' '))
+        return { token, jti, scopes: wanted, ttl: ttlSec, expiresAt: new Date(expiresAt).toISOString() }
+    }
+
+    plugin.revokeMinted = (jti) => grants.revokeMintedToken(jti)
+    plugin.listMinted   = (subject) => grants.listMintedTokens(subject)
+
 
     // The plugin IS a verifier, accepting either credential:
     //

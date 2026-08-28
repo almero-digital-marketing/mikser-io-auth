@@ -227,6 +227,44 @@ keeps them: a registered client and its refresh token exist only because a
 human completed a sign-in once, and they are not something the working folder
 can rebuild.
 
+### Minted tokens
+
+`auth()` publishes a minting surface at `runtime.options.auth`, so another
+plugin can hand out a credential **narrower than the caller's own** without
+importing this package:
+
+```js
+runtime.options.auth.mint({
+    subject:      principal.subject,
+    capabilities: principal.capabilities,   // what they already hold
+    request:      ['webdav:media', 'webdav:media:write'],
+    ttlSec:       300,
+    purpose:      'webdav:media (write)',
+})
+```
+
+The scopes are the **intersection** of `request` and `capabilities`. This can
+only ever narrow: there is no argument that widens anyone's reach, and asking
+for a scope the caller does not hold is refused with the missing one named
+rather than trimmed silently. A caller whose `capabilities` are `null` — a
+static token, not capability-scoped — is refused outright, because it cannot
+delegate what it cannot enumerate.
+
+A minted token carries a **`jti`** and is recorded in `mikser_auth_minted`, which
+makes it revokable before it expires — the one thing an ordinary JWT is not, and
+the thing that matters for a credential handed to a machine that logs its own
+output. `revokeMinted(jti)` kills one; `listMinted(subject)` is the audit view.
+Every mint is logged with subject, purpose, scopes and ttl.
+
+Verification **fails closed**: a token with a `jti` whose row is missing, or
+whose checker was never wired, is rejected. Losing the record must revoke, never
+un-revoke. Session tokens carry no `jti`, so they never touch this table and
+gain no new failure mode.
+
+Minted tokens are **not refreshable**. Expiry is the revocation mechanism, so
+they are deliberately short and a caller mints again rather than renewing one
+that has been sitting in a transcript.
+
 ### When an access token expires
 
 Access tokens are short (`ttl`, default `1h`) and refresh tokens are long, so
