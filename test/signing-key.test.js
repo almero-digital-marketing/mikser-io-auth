@@ -34,26 +34,21 @@ afterEach(async () => {
 const keyFile = () => path.join(dir, 'auth.key')
 const gitignore = () => path.join(dir, '.gitignore')
 
-describe('keeping the signing key out of the repository', () => {
-    it('gitignores the key it creates', async () => {
-        await mkdir(path.join(dir, '.git'), { recursive: true })
-        await loadOrCreateKey({ keyFile: keyFile(), logger: quiet })
-        assert.match(await readFile(gitignore(), 'utf8'), /^auth\.key\*$/m)
-    })
-
-    it('gitignores a key that already existed', async () => {
-        // A deployment whose key predates this guard is exactly as exposed as
-        // a new one — the file is already sitting there unignored.
-        await mkdir(path.join(dir, '.git'), { recursive: true })
-        await loadOrCreateKey({ keyFile: keyFile(), logger: quiet })
-        await rm(gitignore())
-        await loadOrCreateKey({ keyFile: keyFile(), logger: quiet })
-        assert.match(await readFile(gitignore(), 'utf8'), /^auth\.key\*$/m)
-    })
-
-    it('still writes the key 0600', async () => {
+describe('writing the key', () => {
+    it('writes it 0600', async () => {
         await loadOrCreateKey({ keyFile: keyFile(), logger: quiet })
         assert.equal((await stat(keyFile())).mode & 0o777, 0o600)
+    })
+
+    it('leaves .gitignore alone', async () => {
+        // Whether this file is committed is the operator's call: it is written
+        // once, so there is no churn argument, and a private repo is a real
+        // backup for the one thing nothing else can reproduce. The engine
+        // ignores its own database because that one is rewritten constantly —
+        // a reason that does not transfer.
+        await mkdir(path.join(dir, '.git'), { recursive: true })
+        await loadOrCreateKey({ keyFile: keyFile(), logger: quiet })
+        assert.equal(existsSync(gitignore()), false)
     })
 })
 

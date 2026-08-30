@@ -131,23 +131,33 @@ lazily; plugin order doesn't matter, and forgetting to add `identity` to
     auth.key            {"kid":…,"privateJwk":…}   generated on first run, 0600
 ```
 
-`auth.key` is added to `.gitignore` automatically, on the run that creates it
-and on every run after — losing it invalidates every issued token, and leaking
-it lets anyone mint one for any subject. It is ONE key for the whole
-deployment, not one per user.
+`auth.key` is ONE key for the whole deployment, not one per user — every token
+for every subject is signed with it. It is written `0600` on first run and
+never rewritten.
 
-**Back it up.** Nothing else can reproduce it. If it goes missing, the next
-start generates a new one and everyone who was signed in has to authorise
-again — and mikser now says so rather than leaving you to infer it from a wave
-of 401s: the `kid` is recorded in the durable store, and a `kid` that no longer
-matches raises the `auth-signing-key-changed` fault, which shows up in
-`mikser_ping`. Restoring the file from backup is what brings those sessions
-back; leaving it means every client re-registers.
+**Back it up.** Nothing can reproduce it. If it goes missing, the next start
+generates a new one and everyone who was signed in has to authorise again — and
+mikser says so rather than leaving you to infer it from a wave of 401s: the
+`kid` is recorded in the durable store, and one that no longer matches raises
+the `auth-signing-key-changed` fault, which appears in `mikser_ping`. Restoring
+the file from backup is what brings those sessions back; leaving it means every
+client re-registers.
 
-Keep it a file. A single instance is safer with the key on disk at `0600`,
-where it never leaves the box. Only a multi-instance deployment behind a load
-balancer needs it shared — instances signing with different keys reject each
-other's tokens, which from a client looks exactly like random expiry.
+Whether to commit it is **your call, and mikser does not touch your
+`.gitignore`**. In a private repo, committing it is a legitimate backup for the
+one file nothing else can reproduce, and it is written once so it adds no churn.
+Against that, git history does not forget: if the repo's audience ever widens,
+rotating the key does not remove the old one from history. Weigh those for your
+own setup — the engine is in no position to.
+
+(The engine does gitignore its own `mikser.data.sqlite`, for a different reason
+that holds regardless: that file is rewritten on every write, so committing it
+means a binary diff and a conflict every time.)
+
+Keep it a file. A single instance is safer with the key on disk, where it never
+leaves the box. Only a multi-instance deployment behind a load balancer needs it
+shared — instances signing with different keys reject each other's tokens, which
+from a client looks exactly like random expiry.
 
 ### Endpoints
 
