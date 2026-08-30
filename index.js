@@ -28,7 +28,7 @@ export { grants }
  * store can only be opened once the working folder is known:
  *
  *     const identity = auth({
- *         capabilities: { editors: ['api:update', 'mcp:use'] },
+ *         capabilities: { editors: ['api:update', 'drive:documents:write'] },
  *         issuer: 'https://cms.example.com',
  *     })
  *
