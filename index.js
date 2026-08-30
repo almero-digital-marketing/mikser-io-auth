@@ -200,7 +200,7 @@ export function auth(options = {}) {
             // for a build tool — the checks that matter (expiry, single use)
             // are enforced on read, not by the sweep.
             try {
-                const swept = grants.sweepExpired()
+                const swept = await grants.sweepExpired()
                 if (swept.codes || swept.refresh) {
                     logger?.debug?.('auth: swept %d expired code(s), %d refresh token(s)',
                         swept.codes, swept.refresh)
@@ -211,7 +211,7 @@ export function auth(options = {}) {
                 // signed in with are dropped; a config-declared client is
                 // never touched, because it lives in config, not this table.
                 if (pruneClientsAfterDays) {
-                    const pruned = grants.pruneUnusedClients({
+                    const pruned = await grants.pruneUnusedClients({
                         olderThanMs: pruneClientsAfterDays * 24 * 60 * 60 * 1000,
                     })
                     if (pruned) logger?.info?.('auth: pruned %d unused client registration(s)', pruned)

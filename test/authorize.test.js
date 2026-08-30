@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import bcrypt from 'bcryptjs'
 
-import { runtime } from 'mikser-io'
+import { runtime , closeDurableDatabase } from 'mikser-io'
 import { auth } from '../index.js'
 
 // Boot the plugin against a REAL express app and a REAL mikser database, by
@@ -98,6 +98,8 @@ before(async () => {
 })
 
 after(async () => {
+    // knex holds a pool reaper timer; without this the runner never exits.
+    await closeDurableDatabase()
     await new Promise(r => server?.close(r))
     await rm(dir, { recursive: true, force: true })
 })

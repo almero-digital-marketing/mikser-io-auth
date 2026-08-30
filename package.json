@@ -1,7 +1,7 @@
 {
   "name": "mikser-io-auth",
-  "version": "0.10.1",
-  "description": "Authentication for mikser-io: an OAuth 2.1 authorization server (self-registering clients, authorization code + PKCE, refresh rotation) and HTTP Basic / JWT verifiers over Apache-format htpasswd and htgroup files in the working folder. Implements the ADR-0012 verifier contract, so it plugs in wherever a static token does — api, mcp, forms.",
+  "version": "0.11.0",
+  "description": "Authentication for mikser-io: an OAuth 2.1 authorization server (self-registering clients, authorization code + PKCE, refresh rotation) and HTTP Basic / JWT verifiers over Apache-format htpasswd and htgroup files in the working folder. Implements the ADR-0012 verifier contract, so it plugs in wherever a static token does \u2014 api, mcp, forms.",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -26,7 +26,7 @@
   },
   "homepage": "https://github.com/almero-digital-marketing/mikser-io-auth#readme",
   "peerDependencies": {
-    "mikser-io": "^9.50.0"
+    "mikser-io": "^9.57.0"
   },
   "dependencies": {
     "bcryptjs": "^3.0.0",
