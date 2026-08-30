@@ -1,8 +1,8 @@
 import path from 'node:path'
-import { registerRoute, anyOf } from 'mikser-io'
+import { registerRoute, anyOf, useDurableDatabase } from 'mikser-io'
 
 import { createIdentityStore, parseHtpasswd, parseHtgroup, verifyPassword } from './lib/htpasswd.js'
-import { loadOrCreateKey, jwks, ALG } from './lib/keys.js'
+import { loadOrCreateKey, checkKeyContinuity, jwks, ALG } from './lib/keys.js'
 import { issueToken, createTokenVerifier } from './lib/tokens.js'
 import { basic, jwt } from './lib/verifiers.js'
 import { redirectUriAllowed, validateRedirectUri, registerDynamicClient } from './lib/clients.js'
@@ -86,6 +86,17 @@ export function auth(options = {}) {
     }
 
     const plugin = ({ runtime, onLoad, onLoaded, useLogger }) => {
+        // Deliberately NOT in onLoad below.
+        //
+        // The durable store opens at onLoaded, so this check ran against no
+        // database at all and returned null — which the call site ignored.
+        // A guard against a silent failure that fails silently itself is
+        // worse than none: it reads as covered.
+        onLoaded(async () => {
+            if (!state?.key?.kid) return
+            await checkKeyContinuity({ kid: state.key.kid, db: useDurableDatabase(), logger: state.logger })
+        })
+
         onLoad(async () => {
             const logger = useLogger()
             // Published so any transport can say which role is acting and

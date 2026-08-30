@@ -131,8 +131,23 @@ lazily; plugin order doesn't matter, and forgetting to add `identity` to
     auth.key            {"kid":…,"privateJwk":…}   generated on first run, 0600
 ```
 
-Keep `auth.key` out of version control — losing it invalidates every issued
-token; leaking it lets anyone mint one.
+`auth.key` is added to `.gitignore` automatically, on the run that creates it
+and on every run after — losing it invalidates every issued token, and leaking
+it lets anyone mint one for any subject. It is ONE key for the whole
+deployment, not one per user.
+
+**Back it up.** Nothing else can reproduce it. If it goes missing, the next
+start generates a new one and everyone who was signed in has to authorise
+again — and mikser now says so rather than leaving you to infer it from a wave
+of 401s: the `kid` is recorded in the durable store, and a `kid` that no longer
+matches raises the `auth-signing-key-changed` fault, which shows up in
+`mikser_ping`. Restoring the file from backup is what brings those sessions
+back; leaving it means every client re-registers.
+
+Keep it a file. A single instance is safer with the key on disk at `0600`,
+where it never leaves the box. Only a multi-instance deployment behind a load
+balancer needs it shared — instances signing with different keys reject each
+other's tokens, which from a client looks exactly like random expiry.
 
 ### Endpoints
 
