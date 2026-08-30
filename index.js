@@ -49,6 +49,10 @@ export function auth(options = {}) {
         groups       = 'groups.htgroup',
         key          = 'auth.key',
         capabilities = {},
+        // One line per role, in the words the person asking would use. Not
+        // required, and worth writing: it is what turns "you lack
+        // drive:styles:write" into a sentence an end user can forward.
+        roleSummaries = {},
         scopes       = {},
         issuer,
         audience     = issuer,
@@ -84,6 +88,15 @@ export function auth(options = {}) {
     const plugin = ({ runtime, onLoad, onLoaded, useLogger }) => {
         onLoad(async () => {
             const logger = useLogger()
+            // Published so any transport can say which role is acting and
+            // which others exist. The catalogue is not secret — naming the
+            // role that could do something is what makes a handoff possible,
+            // and it reveals nothing about how to obtain one.
+            runtime.options.roles = {
+                catalogue: capabilities,
+                summaries: roleSummaries,
+            }
+
             const workingFolder = runtime.options.workingFolder
             const resolve = (f) => (path.isAbsolute(f) ? f : path.join(workingFolder, f))
 
