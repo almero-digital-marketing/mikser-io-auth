@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { registerRoute, anyOf, useDurableDatabase } from 'mikser-io'
+import { registerRoute, anyOf, useDurableDatabase, provideService } from 'mikser-io'
 
 import { createIdentityStore, parseHtpasswd, parseHtgroup, verifyPassword } from './lib/htpasswd.js'
 import { loadOrCreateKey, checkKeyContinuity, jwks, ALG } from './lib/keys.js'
@@ -99,14 +99,18 @@ export function auth(options = {}) {
 
         onLoad(async () => {
             const logger = useLogger()
-            // Published so any transport can say which role is acting and
+            // Offered so any transport can say which role is acting and
             // which others exist. The catalogue is not secret — naming the
             // role that could do something is what makes a handoff possible,
             // and it reveals nothing about how to obtain one.
-            runtime.options.roles = {
+            //
+            // A service rather than runtime.options.roles: mikser-io-mcp is
+            // the consumer, and it should not have to know this package
+            // exists to ask what roles there are.
+            provideService('roles', {
                 catalogue: capabilities,
                 summaries: roleSummaries,
-            }
+            }, { plugin: 'mikser-io-auth' })
 
             const workingFolder = runtime.options.workingFolder
             const resolve = (f) => (path.isAbsolute(f) ? f : path.join(workingFolder, f))
