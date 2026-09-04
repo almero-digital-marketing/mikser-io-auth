@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { registerRoute, anyOf, useDurableDatabase, provideService } from 'mikser-io'
+import { registerRoute, anyOf, useDurableDatabase, provideService, watchFolder } from 'mikser-io'
 
 import { createIdentityStore, parseHtpasswd, parseHtgroup, verifyPassword } from './lib/htpasswd.js'
 import { loadOrCreateKey, checkKeyContinuity, jwks, ALG } from './lib/keys.js'
@@ -121,6 +121,11 @@ export function auth(options = {}) {
                 groups:     capabilities,
                 scopes,
                 logger,
+                // Invalidate on change rather than stat on every request. The
+                // engine already owns a watcher; this is the same one, minus
+                // the lifecycle meaning. Absent it the store falls back to its
+                // timed recheck and says so.
+                watchFolder,
             })
             const signingKey = await loadOrCreateKey({ keyFile: resolve(key), logger })
 
@@ -254,6 +259,9 @@ export function auth(options = {}) {
 
     plugin.jwt = (opts = {}) => jwt({
         verifyToken: (token) => ready().verifyToken(token),
+        // So a token stops being accepted when the identity behind it
+        // changes, instead of when it expires.
+        currentStamp: (subject) => ready().store.stampOf(subject),
         issuer,
         scopes: [...new Set(Object.values(capabilities).flat())],
         ...opts,
